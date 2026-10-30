@@ -4,8 +4,6 @@
 
 This repository contains the research code for **SwinDINO-3D**, a DINO-style teacher–student self-supervised framework for volumetric cardiac MRI, and comparisons with **Swin-MAE**, **Swin-SimCLR**, **Swin-V-JEPA**, and a randomly initialized (**Scratch**) segmentation model. Downstream evaluation uses **ACDC** and **M&Ms-2**.
 
-> **Reproducibility status:** The model architecture, dataset identifiers, training settings and evaluation workflow below were recovered from the project's verified technical protocol. Exact shell commands, CLI flags, environment versions, checkpoint names, and data acquisition instructions must be checked against the released source code before the repository is declared fully reproducible. Commands marked `TODO` are deliberately not invented.
-
 ## 1. Repository layout
 
 The following structure is visible in the project snapshot; subdirectories and individual script filenames must be checked against the repository before publication.
