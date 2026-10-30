@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+import torch
+from torch import nn
+from monai.networks.nets.swin_unetr import SwinTransformer
+
+
+def _triple(x: Sequence[int]) -> tuple[int, int, int]:
+    if len(x) != 3:
+        raise ValueError(f"Expected a 3D value, got {tuple(x)}.")
+    return tuple(int(v) for v in x)
+
+
+@dataclass(frozen=True)
+class Swin3DConfig:
+    """
+    Configuration for the FM-Bench 3D Swin Transformer backbone.
+
+    This is an encoder-only Swin Transformer. It does not include the
+    UNETR segmentation decoder.
+    """
+
+    input_channels: int = 1
+
+    patch_size: tuple[int, int, int] = (2, 2, 2)
+    window_size: tuple[int, int, int] = (7, 7, 7)
+
+    embed_dim: int = 48
+    depths: tuple[int, int, int, int] = (2, 2, 2, 2)
+    num_heads: tuple[int, int, int, int] = (3, 6, 12, 24)
+
+    mlp_ratio: float = 4.0
+    qkv_bias: bool = True
+
+    drop_rate: float = 0.0
+    attn_drop_rate: float = 0.0
+    drop_path_rate: float = 0.0
+
+    patch_norm: bool = False
+    use_checkpoint: bool = False
+
+    downsample: str = "merging"
+    use_v2: bool = False
+
+    normalize: bool = True
+
+
+class Swin3D(nn.Module):
+    """
+    Encoder-only 3D Swin Transformer backbone.
+
+    Interface
+    ---------
+    forward_intermediates:
+        Return all five multiscale feature maps [x0, ..., x4].
+
+    forward_features:
+        Return the final dense feature map x4.
+
+    forward_pooled:
+        Return a global-average-pooled representation.
+
+    forward:
+        Alias of forward_features.
+    """
+
+    def __init__(self, config: Swin3DConfig | None = None):
+        super().__init__()
+
+        self.config = config or Swin3DConfig()
+
+        self.patch_size = _triple(self.config.patch_size)
+        self.window_size = _triple(self.config.window_size)
+
+        if self.config.input_channels <= 0:
+            raise ValueError("input_channels must be positive.")
+
+        if self.config.embed_dim <= 0:
+            raise ValueError("embed_dim must be positive.")
+
+        if any(v <= 0 for v in self.patch_size):
+            raise ValueError(
+                f"patch_size must contain positive values, got {self.patch_size}."
+            )
+
+        if any(v <= 0 for v in self.window_size):
+            raise ValueError(
+                f"window_size must contain positive values, got {self.window_size}."
+            )
+
+        if len(self.config.depths) != 4:
+            raise ValueError(
+                "MONAI SwinTransformer currently exposes four hierarchical "
+                f"stages; expected 4 depths, got {len(self.config.depths)}."
+            )
+
+        if len(self.config.num_heads) != len(self.config.depths):
+            raise ValueError(
+                "num_heads and depths must have the same length."
+            )
+
+        if any(v <= 0 for v in self.config.depths):
+            raise ValueError("All stage depths must be positive.")
+
+        if any(v <= 0 for v in self.config.num_heads):
+            raise ValueError("All num_heads values must be positive.")
+
+        self.encoder = SwinTransformer(
+            in_chans=self.config.input_channels,
+            embed_dim=self.config.embed_dim,
+            window_size=self.window_size,
+            patch_size=self.patch_size,
+            depths=self.config.depths,
+            num_heads=self.config.num_heads,
+            mlp_ratio=self.config.mlp_ratio,
+            qkv_bias=self.config.qkv_bias,
+            drop_rate=self.config.drop_rate,
+            attn_drop_rate=self.config.attn_drop_rate,
+            drop_path_rate=self.config.drop_path_rate,
+            patch_norm=self.config.patch_norm,
+            use_checkpoint=self.config.use_checkpoint,
+            spatial_dims=3,
+            downsample=self.config.downsample,
+            use_v2=self.config.use_v2,
+        )
+
+        # MONAI returns:
+        #
+        # x0: embed_dim
+        # x1: embed_dim * 2
+        # x2: embed_dim * 4
+        # x3: embed_dim * 8
+        # x4: embed_dim * 16
+        #
+        # Note that encoder.num_features describes the pre-final-downsample
+        # stage and is therefore not the channel count of x4.
+        self.output_channels = [
+            self.config.embed_dim * (2**i)
+            for i in range(len(self.config.depths) + 1)
+        ]
+
+        self.feature_dim = self.output_channels[-1]
+
+        # Patch embedding downsamples once, followed by one downsampling
+        # operation in each of the four BasicLayer stages.
+        self.downsample_factor = tuple(
+            p * (2 ** len(self.config.depths))
+            for p in self.patch_size
+        )
+
+        self.adaptive_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+
+    def _validate_input(self, x: torch.Tensor) -> None:
+        if x.ndim != 5:
+            raise ValueError(
+                "Swin3D expects input with shape [B, C, D, H, W], "
+                f"got {tuple(x.shape)}."
+            )
+
+        if x.shape[1] != self.config.input_channels:
+            raise ValueError(
+                f"Expected {self.config.input_channels} input channels, "
+                f"got {x.shape[1]}."
+            )
+
+        spatial_shape = tuple(int(v) for v in x.shape[2:])
+
+        if any(
+            size % factor != 0
+            for size, factor in zip(spatial_shape, self.downsample_factor)
+        ):
+            raise ValueError(
+                "Input spatial dimensions must be divisible by the total "
+                f"Swin downsampling factor {self.downsample_factor}. "
+                f"Got spatial shape {spatial_shape}."
+            )
+
+    def forward_intermediates(
+        self,
+        x: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """
+        Return all hierarchical feature maps [x0, x1, x2, x3, x4].
+        """
+        self._validate_input(x)
+
+        outputs = self.encoder(
+            x,
+            normalize=self.config.normalize,
+        )
+
+        return outputs
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return the final dense Swin feature map.
+        """
+        return self.forward_intermediates(x)[-1]
+
+    def forward_pooled(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return the global-average-pooled final Swin representation.
+        """
+        features = self.forward_features(x)
+        pooled = self.adaptive_pool(features)
+        return torch.flatten(pooled, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_features(x)

@@ -1,0 +1,416 @@
+"""Masked autoencoding for 3D medical images.
+
+FM-Bench keeps the SSL objective separate from the backbone while allowing
+architecture-appropriate reconstruction networks.
+
+The CNN implementation reproduces the ResEncL MAE setup used by nnSSL:
+75% block masking, zero-valued masked voxels, a ResidualEncoderUNet
+reconstruction network, and MSE evaluated only over masked voxels.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from math import prod
+
+import torch
+from torch import nn
+
+from dynamic_network_architectures.architectures.unet import ResidualEncoderUNet
+
+from fmbench.backbones.cnn3d import CNN3D
+
+
+@dataclass
+class MAEConfig:
+    """Configuration shared by FM-Bench MAE implementations."""
+
+    mask_ratio: float = 0.75
+    mask_block_size: int = 16
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.mask_ratio < 1.0:
+            raise ValueError("mask_ratio must be between 0 and 1.")
+
+        if self.mask_block_size <= 0:
+            raise ValueError("mask_block_size must be positive.")
+
+
+def create_block_mask(
+    spatial_shape: tuple[int, int, int],
+    block_size: int = 16,
+    mask_ratio: float = 0.75,
+    *,
+    device: torch.device | str | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Create the low-resolution binary mask used by the original CNN MAE.
+
+    Returns
+    -------
+    torch.Tensor
+        Shape ``(D/block, H/block, W/block)``.
+
+        ``1`` means visible and ``0`` means masked.
+    """
+
+    if len(spatial_shape) != 3:
+        raise ValueError("spatial_shape must contain exactly three dimensions.")
+
+    if block_size <= 0:
+        raise ValueError("block_size must be positive.")
+
+    if not 0.0 <= mask_ratio <= 1.0:
+        raise ValueError("mask_ratio must be between 0 and 1.")
+
+    if any(size < block_size for size in spatial_shape):
+        raise ValueError(
+            "Every spatial dimension must be at least as large as block_size."
+        )
+
+    if any(size % block_size != 0 for size in spatial_shape):
+        raise ValueError(
+            "Every spatial dimension must be divisible by block_size."
+        )
+
+    low_shape = tuple(size // block_size for size in spatial_shape)
+    n_blocks = prod(low_shape)
+    n_masked = int(mask_ratio * n_blocks)
+
+    flat_mask = torch.ones(
+        n_blocks,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    indices = torch.randperm(
+        n_blocks,
+        generator=generator,
+        device=device,
+    )[:n_masked]
+
+    flat_mask[indices] = 0.0
+
+    return flat_mask.reshape(low_shape)
+
+
+def create_voxel_mask(
+    batch_size: int,
+    spatial_shape: tuple[int, int, int],
+    block_size: int = 16,
+    mask_ratio: float = 0.75,
+    *,
+    device: torch.device | str | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Create a full-resolution MAE mask.
+
+    Output shape is ``(B, 1, D, H, W)``.
+    ``1`` denotes visible voxels and ``0`` denotes masked voxels.
+    """
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+
+    masks = [
+        create_block_mask(
+            spatial_shape,
+            block_size,
+            mask_ratio,
+            device=device,
+            generator=generator,
+        )
+        for _ in range(batch_size)
+    ]
+
+    mask = torch.stack(masks, dim=0).unsqueeze(1)
+
+    mask = mask.repeat_interleave(block_size, dim=2)
+    mask = mask.repeat_interleave(block_size, dim=3)
+    mask = mask.repeat_interleave(block_size, dim=4)
+
+    return mask
+
+
+class MaskedMSELoss(nn.Module):
+    """MSE over masked voxels only.
+
+    Mask convention follows nnSSL:
+    ``1 = visible`` and ``0 = masked``.
+    """
+
+    def forward(
+        self,
+        reconstruction: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if reconstruction.shape != target.shape:
+            raise ValueError(
+                "reconstruction and target must have identical shapes."
+            )
+
+        if mask.shape != target.shape and not (
+            mask.ndim == target.ndim
+            and mask.shape[0] == target.shape[0]
+            and mask.shape[1] == 1
+            and mask.shape[2:] == target.shape[2:]
+        ):
+            raise ValueError(
+                "mask must match target spatial dimensions and batch size."
+            )
+
+        masked = 1.0 - mask
+        denominator = masked.expand_as(target).sum()
+
+        if denominator.item() == 0:
+            raise ValueError("The mask contains no masked voxels.")
+
+        squared_error = (reconstruction - target) ** 2
+
+        return (
+            squared_error * masked
+        ).sum() / denominator
+
+
+from cardiac_ssl.backbones.swin3d import Swin3D
+
+
+class SwinMAEDecoder(nn.Module):
+    """Lightweight reconstruction decoder for the final Swin3D feature map.
+
+    The decoder mirrors the total spatial downsampling factor of the
+    encoder using transposed convolutions. It is used only during MAE
+    pretraining and is discarded for downstream backbone evaluation.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_upsamples: int,
+    ) -> None:
+        super().__init__()
+
+        if in_channels <= 0:
+            raise ValueError("in_channels must be positive.")
+
+        if out_channels <= 0:
+            raise ValueError("out_channels must be positive.")
+
+        if num_upsamples <= 0:
+            raise ValueError("num_upsamples must be positive.")
+
+        layers: list[nn.Module] = []
+        current_channels = in_channels
+
+        for stage in range(num_upsamples):
+            is_last = stage == num_upsamples - 1
+
+            if is_last:
+                next_channels = out_channels
+            else:
+                next_channels = max(
+                    out_channels,
+                    current_channels // 2,
+                )
+
+            layers.append(
+                nn.ConvTranspose3d(
+                    current_channels,
+                    next_channels,
+                    kernel_size=2,
+                    stride=2,
+                )
+            )
+
+            if not is_last:
+                layers.append(
+                    nn.InstanceNorm3d(
+                        next_channels,
+                        eps=1e-5,
+                        affine=True,
+                    )
+                )
+                layers.append(
+                    nn.GELU()
+                )
+
+            current_channels = next_channels
+
+        self.decode = nn.Sequential(*layers)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.decode(x)
+
+
+class SwinMAE(nn.Module):
+    """Masked reconstruction method for the Swin3D backbone.
+
+    Masking is owned by the SSL method rather than the backbone:
+
+        image
+          -> block mask
+          -> zero masked voxels
+          -> Swin3D encoder
+          -> reconstruction decoder
+          -> masked-region MSE
+
+    The Swin encoder itself is therefore identical between pretraining
+    and downstream use.
+    """
+
+    def __init__(
+        self,
+        backbone: Swin3D,
+        config: MAEConfig | None = None,
+    ) -> None:
+        super().__init__()
+
+        if not isinstance(backbone, Swin3D):
+            raise TypeError(
+                "SwinMAE requires a Swin3D backbone."
+            )
+
+        self.backbone = backbone
+        self.config = config or MAEConfig()
+
+        factors = tuple(
+            int(v)
+            for v in backbone.downsample_factor
+        )
+
+        # Current Swin3D uses isotropic powers-of-two downsampling.
+        # Keep this explicit rather than silently constructing an
+        # incorrect decoder for a future anisotropic configuration.
+        if len(set(factors)) != 1:
+            raise ValueError(
+                "SwinMAE currently requires an isotropic total "
+                f"downsampling factor, got {factors}."
+            )
+
+        factor = factors[0]
+
+        if factor <= 0 or factor & (factor - 1):
+            raise ValueError(
+                "SwinMAE requires a power-of-two total "
+                f"downsampling factor, got {factor}."
+            )
+
+        num_upsamples = factor.bit_length() - 1
+
+        self.decoder = SwinMAEDecoder(
+            in_channels=backbone.feature_dim,
+            out_channels=backbone.config.input_channels,
+            num_upsamples=num_upsamples,
+        )
+
+        self.loss_fn = MaskedMSELoss()
+
+    @property
+    def feature_dim(self) -> int:
+        return self.backbone.feature_dim
+
+    def create_mask(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Create a block-wise voxel mask for the input volume."""
+
+        spatial_shape = tuple(
+            int(v)
+            for v in x.shape[2:]
+        )
+
+        return create_voxel_mask(
+            batch_size=x.shape[0],
+            spatial_shape=spatial_shape,
+            block_size=self.config.mask_block_size,
+            mask_ratio=self.config.mask_ratio,
+            device=x.device,
+        ).to(dtype=x.dtype)
+
+    def reconstruct(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.backbone._validate_input(x)
+
+        if mask is None:
+            mask = self.create_mask(x)
+
+        if mask.shape != x.shape:
+            if (
+                mask.ndim == x.ndim
+                and mask.shape[0] == x.shape[0]
+                and mask.shape[1] == 1
+                and mask.shape[2:] == x.shape[2:]
+            ):
+                mask = mask.expand_as(x)
+            else:
+                raise ValueError(
+                    "Mask must have the same shape as the input, "
+                    "or a singleton channel dimension. "
+                    f"Got x={tuple(x.shape)}, "
+                    f"mask={tuple(mask.shape)}."
+                )
+
+        masked_x = x * mask
+
+        features = self.backbone.forward_features(
+            masked_x
+        )
+
+        reconstruction = self.decoder(
+            features
+        )
+
+        if reconstruction.shape != x.shape:
+            raise RuntimeError(
+                "SwinMAE decoder produced an unexpected "
+                f"shape {tuple(reconstruction.shape)}; "
+                f"expected {tuple(x.shape)}."
+            )
+
+        return reconstruction, mask
+
+    def compute_loss(
+        self,
+        x: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        reconstruction, mask = self.reconstruct(x)
+
+        loss = self.loss_fn(
+            reconstruction,
+            x,
+            mask,
+        )
+
+        return {
+            "loss": loss,
+            "reconstruction": reconstruction,
+            "mask": mask,
+        }
+
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor] | torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        if isinstance(batch, torch.Tensor):
+            x = batch
+        elif isinstance(batch, dict):
+            if "data" not in batch:
+                raise KeyError(
+                    "MAE batch must contain 'data'."
+                )
+            x = batch["data"]
+        else:
+            raise TypeError(
+                "batch must be a tensor or dictionary."
+            )
+
+        return self.compute_loss(x)

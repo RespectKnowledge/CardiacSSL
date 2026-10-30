@@ -1,0 +1,85 @@
+"""Self-supervised method registry for Cardiac-SSL."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import torch.nn as nn
+
+from cardiac_ssl.backbones import Swin3D
+
+from .mae import MAEConfig, SwinMAE
+from .simclr import SimCLR, SimCLRConfig
+from .vjepa import VJEPA, VJEPAConfig
+
+
+METHOD_NAMES = ("mae", "simclr", "vjepa")
+
+
+def _as_dict(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    if config is None:
+        return {}
+    if not isinstance(config, Mapping):
+        raise TypeError("Method config must be a mapping or None.")
+    return dict(config)
+
+
+def build_method(
+    name: str,
+    backbone: nn.Module,
+    config: Mapping[str, Any] | None = None,
+) -> nn.Module:
+
+    name = name.lower().strip()
+    cfg = _as_dict(config)
+
+    if "params" in cfg:
+        cfg = dict(cfg["params"])
+
+    cfg.pop("name", None)
+
+    if not isinstance(backbone, Swin3D):
+        raise TypeError(
+            "Cardiac-SSL currently supports the Swin3D backbone only."
+        )
+
+    if name == "mae":
+        common_cfg = {
+            key: value
+            for key, value in cfg.items()
+            if key in {"mask_ratio", "mask_block_size"}
+        }
+        return SwinMAE(
+            backbone,
+            MAEConfig(**common_cfg),
+        )
+
+    if name == "simclr":
+        return SimCLR(
+            backbone,
+            SimCLRConfig(**cfg),
+        )
+
+    if name == "vjepa":
+        return VJEPA(
+            backbone,
+            VJEPAConfig(**cfg),
+        )
+
+    raise ValueError(
+        f"Unknown SSL method {name!r}. "
+        f"Available: {', '.join(METHOD_NAMES)}"
+    )
+
+
+__all__ = [
+    "METHOD_NAMES",
+    "build_method",
+    "MAEConfig",
+    "SwinMAE",
+    "SimCLR",
+    "SimCLRConfig",
+    "VJEPA",
+    "VJEPAConfig",
+]
