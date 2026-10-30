@@ -159,7 +159,6 @@ The evaluation protocol measures **Dice**, **IoU**, **HD95 (mm)** and **average 
 
 ## 9. Citation and license
 
-**Citation:** TODO — add the final manuscript citation or BibTeX entry.
 
 **License:** TODO — choose a license compatible with the code and dependencies; data and pretrained-weight distribution may have separate restrictions.
 
