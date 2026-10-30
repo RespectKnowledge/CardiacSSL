@@ -107,7 +107,7 @@ The pretrained student encoder is loaded into the **SwinSSLUNet** segmentation a
 | Setting | SSL-initialized segmentation | Scratch |
 |---|---|---|
 | Batch size | 2 | 2 |
-| Epochs | 1,000 | 250 |
+| Epochs | 1,000 | 1000 |
 | Training iterations/epoch | 250 | 250 |
 | Validation iterations/epoch | 50 | 50 |
 | Optimizer | SGD, momentum 0.99, Nesterov | Same |
