@@ -145,22 +145,7 @@ statistical_analysis_all.py
 
 The evaluation protocol measures **Dice**, **IoU**, **HD95 (mm)** and **average surface distance (ASD, mm)** for **right ventricle (RV)**, **myocardium (MYO)** and **left ventricle (LV)**, with summary statistics. Run the scripts against held-out predictions and corresponding ground truth. Exact arguments and expected directory layout must be documented from `--help` or the source files.
 
-Reported full-data SwinDINO-3D aggregate results from the manuscript:
-
-| Test dataset | Dice (%) | HD95 (mm) |
-|---|---:|---:|
-| ACDC | 90.11 | 6.22 |
-| M&Ms-2 (external evaluation) | 84.82 | 7.45 |
-
-Do not treat proposed reduced-data ablation numbers as measured results; publish them only after those experiments have actually been run.
-
-## 8. Computational profiling
-
-The observed pretraining runtime was **approximately 24 hours** (confirm per-method hardware and run duration). Observed peak memory was **approximately 20 GB for SwinDINO-3D** and **12–14 GB for the comparison methods**. These are approximate observations, not controlled benchmark measurements.
-
-To report computational complexity reproducibly, profile the same device and precision across methods. Distinguish **forward-pass FLOPs**, **full training-step FLOPs** (including backward and multiple DINO crops), **peak allocated GPU memory**, **total GPU-hours**, and **downstream inference latency per volume**. PyTorch's profiler may omit unsupported attention operators, so record the profiler version and coverage and avoid claiming exact full-model FLOPs without validation.
-
-## 9. Reproducibility checklist
+## 8. Reproducibility checklist
 
 - [ ] Pin software dependencies and specify hardware.
 - [ ] Document dataset access, preprocessing, split generation and leakage checks.
@@ -172,7 +157,7 @@ To report computational complexity reproducibly, profile the same device and pre
 - [ ] Provide measured FLOPs, GPU memory, training duration and inference latency.
 - [ ] Add team affiliations, citation, license and data usage terms.
 
-## 10. Citation and license
+## 9. Citation and license
 
 **Citation:** TODO — add the final manuscript citation or BibTeX entry.
 
