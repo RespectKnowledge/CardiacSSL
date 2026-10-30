@@ -162,6 +162,6 @@ The evaluation protocol measures **Dice**, **IoU**, **HD95 (mm)** and **average 
 
 **License:** TODO — choose a license compatible with the code and dependencies; data and pretrained-weight distribution may have separate restrictions.
 
-## 11. Contact
+## 10. Contact
 
 TODO — add the project maintainer or issue-tracker instructions.
