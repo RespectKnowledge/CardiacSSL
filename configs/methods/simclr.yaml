@@ -1,0 +1,5 @@
+name: simclr
+params:
+  temperature: 0.5
+  projector_hidden_dim: 2048
+  projector_output_dim: 2048

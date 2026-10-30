@@ -1,0 +1,16 @@
+name: vjepa
+params:
+  predictor_dim: 384
+  predictor_depth: 12
+  predictor_heads: 12
+  mlp_ratio: 4.0
+  ema_momentum: 0.99925
+
+  # Dual-block masking.
+  num_context_blocks: 8
+  num_target_blocks: 2
+  context_scale: [0.15, 0.15]
+  target_scale: [0.70, 0.70]
+  aspect_ratio: [0.75, 1.50]
+
+  mask_distance_weight: 0.0

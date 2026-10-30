@@ -1,0 +1,26 @@
+dataset_root: null
+plan: null
+
+batch_size: 2
+num_workers: 8
+
+# Final 3D training patch. This is experiment-configurable,
+# e.g. [96,96,96], [128,128,128], or [160,160,160].
+patch_size: [160, 160, 160]
+
+# null = derive automatically from patch_size and spatial augmentation.
+initial_patch_size: null
+
+spatial_augmentation: true
+intensity_augmentation: true
+
+shuffle: true
+pin_memory: true
+drop_last: true
+
+
+# DINOv2 multi-crop configuration.
+# 96^3 is compatible with the CNN3D total downsampling factor (32)
+# while remaining smaller than the 160^3 global crop.
+dinov2_local_crop_size: [96, 96, 96]
+dinov2_n_local_crops: 4

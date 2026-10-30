@@ -1,0 +1,6 @@
+name: mae
+params:
+  mask_ratio: 0.75
+  mask_block_size: 16
+  decoder_depth: 2
+  decoder_num_heads: 12
