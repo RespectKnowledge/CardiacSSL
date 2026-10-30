@@ -1,0 +1,68 @@
+"""
+Cardiac Swin segmentation network.
+
+The encoder is exactly the Swin3D backbone used during SSL pretraining.
+Only the decoder is segmentation-specific.
+"""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+from cardiac_ssl.backbones.swin3d import (
+    Swin3D,
+    Swin3DConfig,
+)
+
+from downstream.nnunet.networks.swin_decoder import (
+    SwinSegmentationDecoder,
+)
+
+
+class SwinSSLUNet(nn.Module):
+
+    def __init__(
+        self,
+        input_channels: int,
+        num_classes: int,
+        deep_supervision: bool = True,
+    ):
+        super().__init__()
+
+        config = Swin3DConfig(
+            input_channels=input_channels,
+            patch_size=(2, 2, 2),
+            window_size=(7, 7, 7),
+            embed_dim=48,
+            depths=(2, 2, 2, 2),
+            num_heads=(3, 6, 12, 24),
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            drop_rate=0.0,
+            attn_drop_rate=0.0,
+            drop_path_rate=0.0,
+            patch_norm=False,
+            use_checkpoint=False,
+            downsample="merging",
+            use_v2=False,
+            normalize=True,
+        )
+
+        self.encoder = Swin3D(config)
+
+        self.decoder = SwinSegmentationDecoder(
+            encoder_channels=self.encoder.output_channels,
+            num_classes=num_classes,
+            deep_supervision=deep_supervision,
+        )
+
+    def forward(self, x: torch.Tensor):
+        output_size = x.shape[2:]
+
+        features = self.encoder.forward_intermediates(x)
+
+        return self.decoder(
+            features,
+            output_size=output_size,
+        )
